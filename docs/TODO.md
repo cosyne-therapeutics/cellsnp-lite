@@ -10,8 +10,10 @@
 ### Matrix Files
 #### Output optionally qual values/letters to mtx file.
 
+#### (Request +1) Add an option to output matrices for REF and ALT instead of the default AD and DP, to save space.
+
 ### VCF Files
-#### Output VCF header according to input BAM header.
+#### (Request +1) Output VCF header according to input BAM header.
 
 
 

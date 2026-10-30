@@ -15,5 +15,10 @@
 
 #define JF_ZIP_TYPE         2  // 1, gzip; 2, bgzip.
 #define CSP_FIT_MULTI_SMP   1  // nthread auto fit multi samples? 0, no; 1, yes.
+/* BGZF block cache per input file per thread in fetch mode (-R). Neighbouring SNPs re-query
+   the same blocks, so without it every SNP re-inflates them. */
+#ifndef CSP_FETCH_CACHE_SIZE
+#define CSP_FETCH_CACHE_SIZE (64 * 1024 * 1024)
+#endif
 
 #endif

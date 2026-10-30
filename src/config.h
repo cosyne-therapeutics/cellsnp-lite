@@ -17,6 +17,11 @@
 #define CSP_FIT_MULTI_SMP   1  // nthread auto fit multi samples? 0, no; 1, yes.
 /* BGZF block cache per input file per thread in fetch mode (-R). Neighbouring SNPs re-query
    the same blocks, so without it every SNP re-inflates them. */
+/* Pileup mode (-T and mode 2) with multiple threads splits each chrom into chunks of this length,
+   so a single large chrom no longer runs on one thread. */
+#ifndef CSP_PILEUP_CHUNK
+#define CSP_PILEUP_CHUNK 10000000
+#endif
 #ifndef CSP_FETCH_CACHE_SIZE
 #define CSP_FETCH_CACHE_SIZE (64 * 1024 * 1024)
 #endif

@@ -428,6 +428,8 @@ static int csp_pileup_core(void *args) {
           #endif
             if (tid < 0) 
                 break;
+            if (pos < d->beg || pos >= d->end)   // reads overlapping the chunk also pile up outside it
+                continue;
             if (use_target(gs)) {
                 int overlap = regidx_overlap(gs->targets, a[n], pos, pos, itr);
                 biallele_t *ale = NULL;
@@ -566,7 +568,7 @@ int csp_pileup(global_settings *gs) {
     /* core part. */
     int nsample = use_barcodes(gs) ? gs->nbarcode : gs->nin;
     thread_data **td = NULL, *d = NULL;
-    int ntd = 0, mtd;            // ntd: num of thread-data structures that have been created. mtd: size of td array.
+    int ntd = 0, mtd = 0;        // ntd: num of thread-data structures that have been created. mtd: size of td array.
 
     csp_bam_fs **bam_fs = NULL;       /* use array instead of single element to compatible with multi-input-files. */
     csp_bam_fs *bs = NULL;
@@ -583,34 +585,15 @@ int csp_pileup(global_settings *gs) {
 
     size_t ns, nr_ad, nr_dp, nr_oth, ns_merge, nr_merge;
     jfile_t **out_tmp_mtx_ad, **out_tmp_mtx_dp, **out_tmp_mtx_oth, **out_tmp_vcf_base, **out_tmp_vcf_cells;
-
-    /* calc number of threads and number of chroms for each thread. */
-    mtd = gs->nthread > 1 ? gs->nchrom : 1;
-
-    /* create output tmp filenames. */
     out_tmp_mtx_ad = out_tmp_mtx_dp = out_tmp_mtx_oth = out_tmp_vcf_base = out_tmp_vcf_cells = NULL;
-    if (NULL == (out_tmp_mtx_ad = create_tmp_files(gs->out_mtx_ad, mtd, CSP_TMP_ZIP))) {
-        fprintf(stderr, "[E::%s] fail to create tmp files for mtx_AD.\n", __func__);
-        goto clean;
-    }
-    if (NULL == (out_tmp_mtx_dp = create_tmp_files(gs->out_mtx_dp, mtd, CSP_TMP_ZIP))) {
-        fprintf(stderr, "[E::%s] fail to create tmp files for mtx_DP.\n", __func__);
-        goto clean;
-    }
-    if (NULL == (out_tmp_mtx_oth = create_tmp_files(gs->out_mtx_oth, mtd, CSP_TMP_ZIP))) {
-        fprintf(stderr, "[E::%s] fail to create tmp files for mtx_OTH.\n", __func__);
-        goto clean;
-    }
-    if (mtd > 1) {
-        if (NULL == (out_tmp_vcf_base = create_tmp_files(gs->out_vcf_base, mtd, CSP_TMP_ZIP))) {
-            fprintf(stderr, "[E::%s] fail to create tmp files for vcf_BASE.\n", __func__);
-            goto clean;
-        }
-        if (gs->is_genotype && NULL == (out_tmp_vcf_cells = create_tmp_files(gs->out_vcf_cells, mtd, CSP_TMP_ZIP))) {
-            fprintf(stderr, "[E::%s] fail to create tmp files for vcf_CELLS.\n", __func__);
-            goto clean;
-        }
-    }
+
+    // one task per thread_data: a whole chrom list with one thread, otherwise a chunk of one chrom.
+    typedef struct { int c; hts_pos_t beg, end; } pileup_chunk_t;
+    kvec_t(pileup_chunk_t) ck;
+    pileup_chunk_t c;
+    hts_pos_t len;
+    int tid;
+    kv_init(ck);
 
     /* create csp_bam_fs structures */
     // open input files and construct hdr for Thread-0 and 
@@ -641,6 +624,62 @@ int csp_pileup(global_settings *gs) {
     }
     bs = NULL;
 
+    /* calc tasks. htslib's depth cap counts reads buffered before a chunk starts, so splitting chroms is only
+       exact with the cap off; otherwise keep one task per chrom. */
+    if (gs->nthread > 1) {
+        for (i = 0; i < gs->nchrom; i++) {
+            // regidx builds each chrom's index lazily on the first query, which races once several chunks
+            // of one chrom run concurrently; build it here first.
+            if (use_target(gs))
+                regidx_overlap(gs->targets, gs->chroms[i], 0, 0, NULL);
+            len = HTS_POS_MAX;
+            if (gs->max_depth == INT_MAX) {
+                if (NULL == (ref = csp_fmt_chr_name(gs->chroms[i], bam_fs[0]->hdr, s)) || 
+                    (tid = sam_hdr_name2tid(bam_fs[0]->hdr, ref)) < 0) {
+                    fprintf(stderr, "[E::%s] could not parse region for chrom %s.\n", __func__, gs->chroms[i]);
+                    goto clean;
+                }
+                ks_clear(s);
+                len = sam_hdr_tid2len(bam_fs[0]->hdr, tid);
+            }
+            c.c = i; c.beg = 0;
+            do {
+                c.end = len - c.beg > CSP_PILEUP_CHUNK && len != HTS_POS_MAX ? c.beg + CSP_PILEUP_CHUNK : HTS_POS_MAX;
+                kv_push(pileup_chunk_t, ck, c);
+                c.beg = c.end;
+            } while (c.end < len);
+        }
+        mtd = kv_size(ck);
+    } else {
+        c.c = 0; c.beg = 0; c.end = HTS_POS_MAX;
+        kv_push(pileup_chunk_t, ck, c);
+        mtd = 1;
+    }
+
+    /* create output tmp filenames. */
+    if (NULL == (out_tmp_mtx_ad = create_tmp_files(gs->out_mtx_ad, mtd, CSP_TMP_ZIP))) {
+        fprintf(stderr, "[E::%s] fail to create tmp files for mtx_AD.\n", __func__);
+        goto clean;
+    }
+    if (NULL == (out_tmp_mtx_dp = create_tmp_files(gs->out_mtx_dp, mtd, CSP_TMP_ZIP))) {
+        fprintf(stderr, "[E::%s] fail to create tmp files for mtx_DP.\n", __func__);
+        goto clean;
+    }
+    if (NULL == (out_tmp_mtx_oth = create_tmp_files(gs->out_mtx_oth, mtd, CSP_TMP_ZIP))) {
+        fprintf(stderr, "[E::%s] fail to create tmp files for mtx_OTH.\n", __func__);
+        goto clean;
+    }
+    if (mtd > 1) {
+        if (NULL == (out_tmp_vcf_base = create_tmp_files(gs->out_vcf_base, mtd, CSP_TMP_ZIP))) {
+            fprintf(stderr, "[E::%s] fail to create tmp files for vcf_BASE.\n", __func__);
+            goto clean;
+        }
+        if (gs->is_genotype && NULL == (out_tmp_vcf_cells = create_tmp_files(gs->out_vcf_cells, mtd, CSP_TMP_ZIP))) {
+            fprintf(stderr, "[E::%s] fail to create tmp files for vcf_CELLS.\n", __func__);
+            goto clean;
+        }
+    }
+
     /* prepare hts_itr_t */
     titer = (hts_itr_t****) calloc(mtd, sizeof(hts_itr_t***));
     if (NULL == titer) {
@@ -661,7 +700,8 @@ int csp_pileup(global_settings *gs) {
             fprintf(stderr, "[E::%s] could not initialize the thread_data structure.\n", __func__); 
             goto clean; 
         }
-        d->n = ntd; d->m = mtd > 1 ? 1 : gs->nchrom;
+        d->n = kv_A(ck, ntd).c; d->m = mtd > 1 ? 1 : gs->nchrom;
+        d->beg = kv_A(ck, ntd).beg; d->end = kv_A(ck, ntd).end;
         a = gs->chroms + d->n;
         d->i = ntd; d->gs = gs;
 
@@ -692,7 +732,8 @@ int csp_pileup(global_settings *gs) {
                 } else {
                     ks_clear(s);
                 }
-                if (NULL == (itr[nitr] = sam_itr_querys(bam_fs[nitr]->idx, bam_fs[nitr]->hdr, ref))) {
+                if ((tid = sam_hdr_name2tid(bam_fs[nitr]->hdr, ref)) < 0 ||
+                    NULL == (itr[nitr] = sam_itr_queryi(bam_fs[nitr]->idx, tid, d->beg, d->end))) {
                     fprintf(stderr, "[E::%s] could not parse region for chrom %s.\n", __func__, a[niter]);
                     goto clean;
                 }
@@ -833,6 +874,7 @@ int csp_pileup(global_settings *gs) {
         for (i = 0; i < mtd; i++) { thdata_destroy(td[i]); }
         free(td);
     }
+    kv_destroy(ck);
     if (s) { ks_free(s); }
     if (titer) {
         for (i = 0; i < ntiter; i++) {

@@ -227,6 +227,7 @@ typedef struct {
     hts_itr_t ***iter;     
     int niter, nitr;       // niter: Size of @p iter; nitr: Size of one element of @p iter.
     size_t m, n;           // m: Total size; n: pos of next element; for snp-list or chrom-list.
+    hts_pos_t beg, end;    // Pileup mode: only positions in [beg, end) of the chroms are output.
     int i;                 // Id of the thread data.
     int ret;               // Running state of the thread.
     size_t ns, nr_ad, nr_dp, nr_oth;   // ns: Num of SNPs that passed all filters; nr_*: Num of records for each output matrix file.

@@ -40,6 +40,27 @@ static inline void mp_aux_destroy(mp_aux_t *p) {
 
 static inline void mp_aux_reset(mp_aux_t *p) { }
 
+/* Whether any target lies in an aligned (M/=/X) block of the read. At D/N positions a read is never counted,
+   so a spliced read whose span covers targets only inside its introns can be dropped before it enters the
+   pileup buffer, where it would otherwise be stepped over at every position of the intron. */
+static int target_in_aligned_blocks(regidx_t *idx, const char *chrom, bam1_t *b) {
+    uint32_t *cigar = bam_get_cigar(b);
+    hts_pos_t x = b->core.pos;
+    int k, op, l;
+    for (k = 0; k < b->core.n_cigar; k++) {
+        op = bam_cigar_op(cigar[k]);
+        l = bam_cigar_oplen(cigar[k]);
+        if (op == BAM_CMATCH || op == BAM_CEQUAL || op == BAM_CDIFF) {
+            if (regidx_overlap(idx, chrom, x, x + l - 1, NULL))
+                return 1;
+            x += l;
+        } else if (bam_cigar_type(op) & 2) {
+            x += l;
+        }
+    }
+    return 0;
+}
+
 /*!@func
 @abstract    bam_plp_auto_f used by bam_mplp_init to extract valid reads to be pushed into bam_mpileup stack.
 @param data  Pointer to auxiliary data.
@@ -67,10 +88,17 @@ static int mp_func(void *data, bam1_t *b) {
         if (gs->no_orphan && c->flag & BAM_FPAIRED && ! (c->flag & BAM_FPROPER_PAIR)) 
             continue;
         if (use_target(gs)) {
-            int beg = c->pos, end = bam_endpos(b) - 1;
-            int overlap = regidx_overlap(gs->targets, dat->chrom, beg, end, NULL);
-            if (! overlap) 
-                continue;
+            // the stricter filter is exact only when htslib's depth cap is off (it counts every buffered
+            // read) and min_count > 0 (a target covered only by D/N reads would otherwise be output as zeros).
+            if (gs->max_depth == INT_MAX && gs->min_count > 0) {
+                if (! target_in_aligned_blocks(gs->targets, dat->chrom, b))
+                    continue;
+            } else {
+                int beg = c->pos, end = bam_endpos(b) - 1;
+                int overlap = regidx_overlap(gs->targets, dat->chrom, beg, end, NULL);
+                if (! overlap)
+                    continue;
+            }
         }
         break;
     } while (1);

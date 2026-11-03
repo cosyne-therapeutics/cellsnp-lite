@@ -281,6 +281,8 @@ static size_t csp_fetch_core(void *args) {
             nfp++;
         }
     }
+    for (i = 0; i < nfp; i++)
+        hts_set_cache_size(fp[i], CSP_FETCH_CACHE_SIZE);
 
     /* prepare mplp for pileup. */
   #if CSP_FIT_MULTI_SMP
